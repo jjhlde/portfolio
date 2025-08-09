@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>iPad 전면 카메라 핀치 드로잉</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #171a21;
+      --ink: #ffffff;
+      --accent: #6ea8fe;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Noto Sans, AppleSDGothicNeo, "Apple Color Emoji", EmojiOne Color, "Segoe UI Emoji", sans-serif;
+    }
+    header { padding: 12px 16px; border-bottom: 1px solid #222833; }
+    header h1 { font-size: 18px; margin: 0 0 6px; }
+    header p { margin: 0; opacity: .8; font-size: 13px; }
+
+    .wrap {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      padding: 14px;
+    }
+    @media (max-width: 980px) {
+      .wrap { grid-template-columns: 1fr; }
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid #222833;
+      border-radius: 14px;
+      overflow: hidden;
+      box-shadow: 0 6px 24px rgba(0,0,0,.25);
+    }
+    .panel header { border: 0; background: rgba(255,255,255,.02); }
+    .panel header h2 { font-size: 14px; margin: 0; letter-spacing: .2px; opacity: .9; }
+
+    .videoBox, .drawBox { position: relative; aspect-ratio: 4 / 3; background: #0b0e13; }
+    video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+    canvas.videoOverlay { position: absolute; inset: 0; pointer-events: none; }
+
+    .controls {
+      display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+      padding: 10px 12px; border-top: 1px solid #222833;
+      background: rgba(255,255,255,.02);
+    }
+    .controls > * { font-size: 14px; }
+    button, input, select, label {
+      background: #10141c; color: var(--ink); border: 1px solid #2a3344; border-radius: 10px;
+      padding: 8px 10px; outline: none;
+    }
+    button { cursor: pointer; }
+    button.primary { background: #1a2435; border-color: #2a3b5a; }
+    .spacer { flex: 1; }
+    .cursorDot { position: absolute; width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--accent); transform: translate(-50%, -50%); pointer-events: none; display:none; }
+
+    .drawBox canvas#drawCanvas { width: 100%; height: 100%; background: #0b0e13; display: block; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>iPad/모바일 전면 카메라 핀치(검지+엄지)로 옆 화면에 그림 그리기</h1>
+    <p>Start을 눌러 카메라 권한을 허용한 뒤, 검지와 엄지를 맞대면 오른쪽 캔버스에 선이 그려집니다. (핀치 유지 동안 드로잉)</p>
+  </header>
+
+  <div class="wrap">
+    <!-- Left: Camera + Hand overlay -->
+    <section class="panel" id="leftPanel">
+      <header><h2>카메라(전/후면 전환 지원) &amp; 손 인식</h2></header>
+      <div class="videoBox">
+        <video id="video" playsinline muted></video>
+        <canvas class="videoOverlay" id="overlay"></canvas>
+        <div class="cursorDot" id="cursor"></div>
+      </div>
+      <div class="controls">
+        <button id="btnStart" class="primary">▶ Start</button>
+        <button id="btnStop">⏹ Stop</button>
+        <button id="btnFlip">🔄 카메라 전환</button>
+        <label style="display:flex;gap:6px;align-items:center;">저전력<input type="checkbox" id="lowPower"></label>
+        <span class="spacer"></span>
+        <label>Pinch threshold <input type="range" id="pinchRange" min="0.02" max="0.12" step="0.005" value="0.055"/></label>
+        <span id="pinchVal" style="opacity:.8">0.055</span>
+      </div>
+    </section>
+
+    <!-- Right: Drawing canvas -->
+    <section class="panel" id="rightPanel">
+      <header><h2>드로잉 캔버스</h2></header>
+      <div class="drawBox">
+        <canvas id="drawCanvas"></canvas>
+      </div>
+      <div class="controls">
+        <label>Stroke <input type="range" id="stroke" min="1" max="20" step="1" value="6"></label>
+        <input type="color" id="color" value="#6ea8fe" />
+        <button id="btnClear">지우기</button>
+        <label style="display:flex;gap:6px;align-items:center;">
+          <input type="checkbox" id="drawWhilePinch" checked>
+          핀치 중에만 그리기
+        </label>
+      </div>
+    </section>
+  </div>
+
+  <!-- MediaPipe (legacy, but light & simple to use via CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+
+  <script>
+    // ---------- DOM refs ----------
+    const video = document.getElementById('video');
+    const overlay = document.getElementById('overlay');
+    const octx = overlay.getContext('2d');
+    const cursor = document.getElementById('cursor');
+
+    const drawCanvas = document.getElementById('drawCanvas');
+    const dctx = drawCanvas.getContext('2d');
+
+    const btnStart = document.getElementById('btnStart');
+    const btnStop = document.getElementById('btnStop');
+    const btnFlip = document.getElementById('btnFlip');
+    const lowPower = document.getElementById('lowPower');
+    const btnClear = document.getElementById('btnClear');
+    const stroke = document.getElementById('stroke');
+    const color = document.getElementById('color');
+    const pinchRange = document.getElementById('pinchRange');
+    const pinchVal = document.getElementById('pinchVal');
+    const drawWhilePinch = document.getElementById('drawWhilePinch');
+
+    // ---------- Layout & sizing ----------
+    function fitCanvases() {
+      const vb = video.getBoundingClientRect();
+      overlay.width = vb.width * devicePixelRatio; // overlay follows video element size
+      overlay.height = vb.height * devicePixelRatio;
+
+      const db = drawCanvas.getBoundingClientRect();
+      drawCanvas.width = db.width * devicePixelRatio;
+      drawCanvas.height = db.height * devicePixelRatio;
+      dctx.lineCap = 'round';
+      dctx.lineJoin = 'round';
+    }
+    addEventListener('resize', fitCanvases);
+    addEventListener('orientationchange', () => setTimeout(fitCanvases, 300));
+
+    // ---------- State ----------
+    let camera = null;
+    let hands = null;
+    let isFront = true; // true: front(user), false: back(environment)
+    let lastPt = null;   // last draw point (in draw canvas pixels)
+
+    const state = {
+      pinchThreshold: parseFloat(pinchRange.value),
+      smoothing: 0.35, // exponential moving average for cursor
+      smoothed: null,
+    };
+
+    pinchRange.addEventListener('input', () => {
+      state.pinchThreshold = parseFloat(pinchRange.value);
+      pinchVal.textContent = pinchRange.value;
+    });
+
+    btnClear.addEventListener('click', () => {
+      dctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+    });
+
+    // ---------- Utils ----------
+    function lerp(a, b, t){ return a + (b - a) * t; }
+
+    function normToCanvas(x, y) {
+      // x,y are normalized [0..1] in video space (before mirror). Our <video> is mirrored via CSS scaleX(-1).
+      // To feel natural, mirror X back here.
+      const db = drawCanvas.getBoundingClientRect();
+      const mirroredX = 1 - x;
+      const cx = mirroredX * db.width;
+      const cy = y * db.height;
+      // account for HiDPI canvas
+      return [cx * devicePixelRatio, cy * devicePixelRatio];
+    }
+
+    function drawLineTo(pt){
+      dctx.strokeStyle = color.value;
+      dctx.lineWidth = parseFloat(stroke.value);
+      if (!lastPt) {
+        lastPt = pt;
+        return;
+      }
+      dctx.beginPath();
+      dctx.moveTo(lastPt[0], lastPt[1]);
+      dctx.lineTo(pt[0], pt[1]);
+      dctx.stroke();
+      lastPt = pt;
+    }
+
+    function setCursor(xPx, yPx) {
+      const vb = video.getBoundingClientRect();
+      // map to overlay DOM coords (not HiDPI)
+      const x = (xPx / devicePixelRatio);
+      const y = (yPx / devicePixelRatio);
+      cursor.style.left = (vb.left + (vb.width - x)) + 'px'; // because <video> is mirrored, keep dot aligned visually
+      cursor.style.top = (vb.top + y) + 'px';
+    }
+
+    // ---------- MediaPipe Hands ----------
+    function setupHands() {
+      hands = new Hands({locateFile: (file)=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+      const complexity = lowPower?.checked ? 0 : 1;
+      hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: complexity,
+        minDetectionConfidence: 0.6,
+        minTrackingConfidence: 0.6
+      });
+      hands.onResults(onResults);
+    }
+
+    async function startCamera() {
+      if (!hands) setupHands();
+      else {
+        const complexity = lowPower?.checked ? 0 : 1;
+        hands.setOptions({ modelComplexity: complexity });
+      }
+      // Prefer exact facingMode; some devices honor it better than deviceId
+      const constraints = {
+        video: {
+          facingMode: isFront ? { ideal: 'user' } : { ideal: 'environment' },
+          width: { ideal: 1280 }, height: { ideal: 720 }
+        },
+        audio: false
+      };
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        video.srcObject = stream;
+        await video.play();
+      } catch (e) {
+        alert('카메라에 접근할 수 없습니다. iOS는 HTTPS 환경과 사용자 제스처가 필요합니다. 다른 카메라를 시도합니다.\n' + e);
+        // fallback: try without facingMode
+        const fallback = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        video.srcObject = fallback; await video.play();
+      }
+
+      fitCanvases();
+
+      camera = new Camera(video, {
+        onFrame: async () => { await hands.send({ image: video }); },
+        width: 1280,
+        height: 720
+      });
+      camera.start();
+    }
+
+    function stopCamera() {
+      if (camera) { camera.stop(); camera = null; }
+      if (video.srcObject) {
+        video.srcObject.getTracks().forEach(t => t.stop());
+        video.srcObject = null;
+      }
+      octx.clearRect(0,0,overlay.width, overlay.height);
+      cursor.style.display = 'none';
+    }
+
+    btnStart.addEventListener('click', startCamera);
+    btnStop.addEventListener('click', stopCamera);
+    btnFlip.addEventListener('click', async () => { isFront = !isFront; stopCamera(); await startCamera(); });
+    if (lowPower) lowPower.addEventListener('change', async () => { if (camera) { stopCamera(); await startCamera(); } });
+
+    // ---------- Results callback ----------
+    function onResults(results){
+      // Resize overlay to match displayed <video> size
+      fitCanvases();
+      octx.save();
+      octx.clearRect(0,0,overlay.width, overlay.height);
+
+      if (results.multiHandLandmarks && results.multiHandLandmarks.length) {
+        const lm = results.multiHandLandmarks[0];
+        // landmarks are normalized [0..1]
+        const thumbTip = lm[4];
+        const indexTip = lm[8];
+
+        // pinch distance in normalized units
+        const dx = thumbTip.x - indexTip.x;
+        const dy = thumbTip.y - indexTip.y;
+        const pinch = Math.hypot(dx, dy);
+        const isPinching = pinch < state.pinchThreshold;
+
+        // Convert to draw canvas pixels
+        const [cx, cy] = normToCanvas(indexTip.x, indexTip.y);
+
+        // Smooth cursor
+        if (!state.smoothed) state.smoothed = [cx, cy];
+        state.smoothed = [
+          lerp(state.smoothed[0], cx, state.smoothing),
+          lerp(state.smoothed[1], cy, state.smoothing)
+        ];
+
+        // Show cursor dot over the video area
+        cursor.style.display = 'block';
+        setCursor(state.smoothed[0], state.smoothed[1]);
+
+        // Draw on the right canvas
+        if (drawWhilePinch.checked) {
+          if (isPinching) {
+            drawLineTo(state.smoothed);
+          } else {
+            lastPt = null; // lift pen
+          }
+        } else {
+          // Always draw continuous line
+          drawLineTo(state.smoothed);
+        }
+
+        // Optional: draw skeleton on overlay for feedback
+        octx.lineWidth = 2 * devicePixelRatio;
+        octx.strokeStyle = 'rgba(255,255,255,0.5)';
+        octx.fillStyle = isPinching ? 'rgba(110,168,254,0.9)' : 'rgba(255,255,255,0.7)';
+        // draw tips
+        const toPx = (p)=>[p.x*overlay.width, p.y*overlay.height];
+        const [tx, ty] = toPx(thumbTip);
+        const [ix, iy] = toPx(indexTip);
+        octx.beginPath(); octx.arc(overlay.width - ix, iy, 6*devicePixelRatio, 0, Math.PI*2); octx.fill();
+        octx.beginPath(); octx.arc(overlay.width - tx, ty, 6*devicePixelRatio, 0, Math.PI*2); octx.fill();
+        octx.beginPath(); octx.moveTo(overlay.width - ix, iy); octx.lineTo(overlay.width - tx, ty); octx.stroke();
+      } else {
+        cursor.style.display = 'none';
+        lastPt = null;
+      }
+      octx.restore();
+    }
+
+    // initial sizing (for SSR/first paint)
+    document.addEventListener('DOMContentLoaded', fitCanvases);
+    // pause/resume camera when tab hidden on phones
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) { stopCamera(); }
+      else if (!camera && video) { /* user can hit Start to resume */ }
+    });
+  </script>
+</body>
+</html>
